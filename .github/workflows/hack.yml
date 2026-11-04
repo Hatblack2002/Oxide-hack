@@ -1,0 +1,32 @@
+name: Mod APK Oxide
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget
+          wget https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.40/Il2CppDumper-v6.7.40.zip
+          unzip Il2CppDumper-v6.7.40.zip -d Il2CppDumper
+
+      - name: Run Il2CppDumper
+        run: |
+          mkdir -p Il2CppDumper/input
+          cp global-metadata.dat Il2CppDumper/input/
+          cp libil2cpp.so Il2CppDumper/input/
+          cd Il2CppDumper
+          ./Il2CppDumper input/global-metadata.dat input/libil2cpp.so output/
+
+      - name: Upload Result
+        uses: actions/upload-artifact@v3
+        with:
+          name: Il2Cpp-Dump
+          path: Il2CppDumper/output/
