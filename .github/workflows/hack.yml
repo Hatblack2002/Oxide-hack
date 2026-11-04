@@ -17,7 +17,7 @@ jobs:
     timeout-minutes: 25
 
     env:
-      APK_URL: https://drive.google.com/file/d/1-49gBaLpzZINdeyxDz0Rs8VeO11gZaYV/view?usp=drivesdk
+      APK_DRIVE_ID: 1-49gBaLpzZINdeyxDz0Rs8VeO11gZaYV
 
     steps:
       - name: Checkout repository
@@ -39,7 +39,7 @@ jobs:
       - name: Download assets APK from Google Drive
         run: |
           set -euo pipefail
-          gdown --fuzzy "$APK_URL" --output assets.apk
+          gdown "$APK_DRIVE_ID" --output assets.apk
           test -s assets.apk
           unzip -tq assets.apk
           echo "APK downloaded and ZIP integrity verified."
