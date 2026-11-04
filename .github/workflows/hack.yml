@@ -1,4 +1,5 @@
-name: Oxide package metadata audit
+
+name: Oxide Il2CppDumper
 
 on:
   workflow_dispatch:
@@ -7,76 +8,129 @@ permissions:
   contents: read
 
 concurrency:
-  group: oxide-package-audit-${{ github.ref }}
+  group: oxide-il2cpp-dump-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  audit:
-    name: Audit APK and split package contents
+  dump:
+    name: Extract IL2CPP metadata and generate dump.cs
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 60
+
     env:
-      APK_DRIVE_ID: 1-49gBaLpzZINdeyxDz0Rs8VeO11gZaYV
-      LIBIL2CPP_DRIVE_ID: 1sC1OTMgJeHJjxrN6k_uGWdQ_8hiQhPxf
       SPLIT_APK_DRIVE_ID: 1mSvcq6EQ7OruB-kAzRXdhverIF51P8I_
+      LIBIL2CPP_DRIVE_ID: 1sC1OTMgJeHJjxrN6k_uGWdQ_8hiQhPxf
+      DUMPER_VERSION: v6.7.46
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Install tools
+      - name: Install download and extraction tools
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y unzip file binutils python3-pip
+          sudo apt-get install -y unzip curl python3-pip
           python3 -m pip install --user --break-system-packages gdown
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Download supplied package files
+      - name: Install .NET 6
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 6.0.x
+
+      - name: Download split APK and native library
         run: |
           set -euo pipefail
-          mkdir -p audit
-          gdown "$APK_DRIVE_ID" --output base.apk
+
           gdown "$SPLIT_APK_DRIVE_ID" --output split.apk
           gdown "$LIBIL2CPP_DRIVE_ID" --output libil2cpp.so
-          for f in base.apk split.apk; do
-            test -s "$f"
-            if ! unzip -tq "$f"; then
-              echo "::error::$f is not a valid APK/ZIP archive"
-              exit 1
-            fi
-          done
-          file libil2cpp.so | tee audit/native-library.txt
-          readelf -h libil2cpp.so | tee -a audit/native-library.txt
-          readelf -h libil2cpp.so | grep -q 'AArch64'
 
-      - name: Inventory package contents
+          test -s split.apk
+          test -s libil2cpp.so
+
+          unzip -tq split.apk
+          file libil2cpp.so
+
+      - name: Extract global-metadata.dat
         run: |
           set -euo pipefail
-          {
-            echo "APK package inventory"
-            for f in base.apk split.apk; do
-              echo
-              echo "===== $f ====="
-              unzip -Z1 "$f" | sort
-            done
-          } > audit/package-entries.txt
 
-          {
-            echo "Metadata filename matches"
-            for f in base.apk split.apk; do
-              echo
-              echo "===== $f ====="
-              unzip -Z1 "$f" | grep -Ei 'global-metadata|metadata|\.obb$' || true
-            done
-          } > audit/metadata-candidates.txt
+          unzip -j split.apk \
+            "assets/bin/Data/Managed/Metadata/global-metadata.dat" \
+            -d .
 
-          cat audit/metadata-candidates.txt
+          test -s global-metadata.dat
 
-      - name: Upload audit report
+          echo "Metadata extracted:"
+          ls -lh global-metadata.dat
+
+      - name: Download and configure Il2CppDumper
+        run: |
+          set -euo pipefail
+
+          mkdir -p tools
+
+          curl -fL \
+            "https://github.com/Perfare/Il2CppDumper/releases/download/${DUMPER_VERSION}/Il2CppDumper-net6-${DUMPER_VERSION}.zip" \
+            -o tools/Il2CppDumper.zip
+
+          unzip -oq tools/Il2CppDumper.zip -d tools/Il2CppDumper
+
+          DUMPER_DLL="$(find tools/Il2CppDumper -type f -name 'Il2CppDumper.dll' -print -quit)"
+
+          if [ -z "$DUMPER_DLL" ]; then
+            echo "::error::Il2CppDumper.dll not found in release archive"
+            find tools/Il2CppDumper -maxdepth 3 -type f
+            exit 1
+          fi
+
+          echo "DUMPER_DLL=$DUMPER_DLL" >> "$GITHUB_ENV"
+          dotnet --version
+
+      - name: Execute Il2CppDumper
+        id: dumper
+        run: |
+          set -uo pipefail
+
+          mkdir -p output
+
+          echo "Starting Il2CppDumper..."
+          echo "Native binary: libil2cpp.so"
+          echo "Metadata: global-metadata.dat"
+          echo "Output: output/"
+
+          set +e
+          dotnet "$DUMPER_DLL" \
+            "$PWD/libil2cpp.so" \
+            "$PWD/global-metadata.dat" \
+            "$PWD/output" 2>&1 | tee output/dumper.log
+
+          DUMPER_STATUS=${PIPESTATUS[0]}
+          set -e
+
+          echo "exit_code=$DUMPER_STATUS" >> "$GITHUB_OUTPUT"
+
+          if [ "$DUMPER_STATUS" -ne 0 ]; then
+            echo "::error::Il2CppDumper failed with exit code $DUMPER_STATUS"
+            exit "$DUMPER_STATUS"
+          fi
+
+          echo "Il2CppDumper completed successfully."
+
+          if [ ! -f output/dump.cs ]; then
+            echo "::warning::dump.cs was not found at output/dump.cs"
+            find output -maxdepth 3 -type f -print
+          else
+            echo "dump.cs generated successfully."
+            ls -lh output/dump.cs
+          fi
+
+      - name: Upload dump artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: oxide-package-audit
-          path: audit/
+          name: oxide-il2cpp-dump
+          path: output/
           if-no-files-found: warn
           retention-days: 7
