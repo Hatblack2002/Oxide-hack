@@ -1,8 +1,10 @@
-
 name: Oxide Il2CppDumper
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/hack.yml"
 
 permissions:
   contents: read
@@ -13,7 +15,7 @@ concurrency:
 
 jobs:
   dump:
-    name: Extract IL2CPP metadata and generate dump.cs
+    name: Validate metadata and generate dump.cs
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -26,11 +28,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install download and extraction tools
+      - name: Install tools
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y unzip curl python3-pip
+          sudo apt-get install -y unzip curl file xxd python3-pip
           python3 -m pip install --user --break-system-packages gdown
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
@@ -39,94 +41,108 @@ jobs:
         with:
           dotnet-version: 6.0.x
 
-      - name: Download split APK and native library
+      - name: Download package files
         run: |
           set -euo pipefail
-
           gdown "$SPLIT_APK_DRIVE_ID" --output split.apk
           gdown "$LIBIL2CPP_DRIVE_ID" --output libil2cpp.so
-
           test -s split.apk
           test -s libil2cpp.so
-
           unzip -tq split.apk
           file libil2cpp.so
+          sha256sum split.apk libil2cpp.so
 
-      - name: Extract global-metadata.dat
+      - name: Extract and validate metadata
+        id: metadata
         run: |
           set -euo pipefail
-
-          unzip -j split.apk \
-            "assets/bin/Data/Managed/Metadata/global-metadata.dat" \
-            -d .
-
+          mkdir -p output
+          unzip -j split.apk "assets/bin/Data/Managed/Metadata/global-metadata.dat" -d .
           test -s global-metadata.dat
 
-          echo "Metadata extracted:"
-          ls -lh global-metadata.dat
+          SIZE=$(stat -c '%s' global-metadata.dat)
+          MAGIC=$(xxd -p -l 4 global-metadata.dat | tr '[:upper:]' '[:lower:]')
+
+          {
+            echo "Metadata size: ${SIZE} bytes"
+            echo "Metadata magic: ${MAGIC}"
+            echo "Expected IL2CPP magic: af1bb1fa"
+            echo
+            echo "First 64 bytes:"
+            xxd -g 1 -l 64 global-metadata.dat
+            echo
+            echo "SHA-256:"
+            sha256sum global-metadata.dat
+          } | tee output/metadata-validation.txt
+
+          if [ "$MAGIC" = "af1bb1fa" ]; then
+            echo "valid=true" >> "$GITHUB_OUTPUT"
+            echo "Metadata header matches standard IL2CPP magic."
+          else
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Metadata does not have the standard IL2CPP magic. Dumper execution will be skipped."
+          fi
 
       - name: Download and configure Il2CppDumper
+        if: steps.metadata.outputs.valid == 'true'
         run: |
           set -euo pipefail
-
-          mkdir -p tools
-
-          curl -fL \
-            "https://github.com/Perfare/Il2CppDumper/releases/download/${DUMPER_VERSION}/Il2CppDumper-net6-${DUMPER_VERSION}.zip" \
-            -o tools/Il2CppDumper.zip
-
+          mkdir -p tools/Il2CppDumper
+          curl -fL "https://github.com/Perfare/Il2CppDumper/releases/download/${DUMPER_VERSION}/Il2CppDumper-net6-${DUMPER_VERSION}.zip" -o tools/Il2CppDumper.zip
           unzip -oq tools/Il2CppDumper.zip -d tools/Il2CppDumper
 
           DUMPER_DLL="$(find tools/Il2CppDumper -type f -name 'Il2CppDumper.dll' -print -quit)"
+          CONFIG="$(find tools/Il2CppDumper -type f -name 'config.json' -print -quit)"
 
-          if [ -z "$DUMPER_DLL" ]; then
-            echo "::error::Il2CppDumper.dll not found in release archive"
-            find tools/Il2CppDumper -maxdepth 3 -type f
-            exit 1
-          fi
+          test -n "$DUMPER_DLL"
+          test -n "$CONFIG"
+
+          python3 - "$CONFIG" <<'PY'
+          import json, sys
+          path = sys.argv[1]
+          with open(path, encoding="utf-8") as f:
+              config = json.load(f)
+          config["RequireAnyKey"] = False
+          with open(path, "w", encoding="utf-8") as f:
+              json.dump(config, f, indent=2)
+          print("RequireAnyKey=false configured")
+          PY
 
           echo "DUMPER_DLL=$DUMPER_DLL" >> "$GITHUB_ENV"
-          dotnet --version
 
       - name: Execute Il2CppDumper
-        id: dumper
+        if: steps.metadata.outputs.valid == 'true'
         run: |
           set -uo pipefail
-
           mkdir -p output
 
-          echo "Starting Il2CppDumper..."
-          echo "Native binary: libil2cpp.so"
-          echo "Metadata: global-metadata.dat"
-          echo "Output: output/"
-
           set +e
-          dotnet "$DUMPER_DLL" \
-            "$PWD/libil2cpp.so" \
-            "$PWD/global-metadata.dat" \
-            "$PWD/output" 2>&1 | tee output/dumper.log
-
-          DUMPER_STATUS=${PIPESTATUS[0]}
+          dotnet "$DUMPER_DLL" "$PWD/libil2cpp.so" "$PWD/global-metadata.dat" "$PWD/output" 2>&1 | tee output/dumper.log
+          STATUS=${PIPESTATUS[0]}
           set -e
 
-          echo "exit_code=$DUMPER_STATUS" >> "$GITHUB_OUTPUT"
-
-          if [ "$DUMPER_STATUS" -ne 0 ]; then
-            echo "::error::Il2CppDumper failed with exit code $DUMPER_STATUS"
-            exit "$DUMPER_STATUS"
+          if [ "$STATUS" -ne 0 ]; then
+            echo "::error::Il2CppDumper exited with code $STATUS"
+            exit "$STATUS"
           fi
 
-          echo "Il2CppDumper completed successfully."
-
-          if [ ! -f output/dump.cs ]; then
-            echo "::warning::dump.cs was not found at output/dump.cs"
+          if [ ! -s output/dump.cs ]; then
+            echo "::warning::Il2CppDumper finished but output/dump.cs was not found."
             find output -maxdepth 3 -type f -print
           else
-            echo "dump.cs generated successfully."
             ls -lh output/dump.cs
           fi
 
-      - name: Upload dump artifacts
+      - name: Record skipped dump
+        if: steps.metadata.outputs.valid != 'true'
+        run: |
+          {
+            echo "Il2CppDumper was not run."
+            echo "The extracted metadata failed the standard IL2CPP magic check."
+            echo "Inspect metadata-validation.txt and verify that this metadata belongs to the supplied libil2cpp.so."
+          } > output/dump-skipped.txt
+
+      - name: Upload diagnostic and dump artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
