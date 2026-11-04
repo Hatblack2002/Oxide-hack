@@ -18,6 +18,7 @@ jobs:
 
     env:
       APK_DRIVE_ID: 1-49gBaLpzZINdeyxDz0Rs8VeO11gZaYV
+      LIBIL2CPP_DRIVE_ID: 1sC1OTMgJeHJjxrN6k_uGWdQ_8hiQhPxf
 
     steps:
       - name: Checkout repository
@@ -32,35 +33,40 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y unzip file python3-pip
+          sudo apt-get install -y unzip file binutils python3-pip
           python3 -m pip install --user --break-system-packages gdown
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Download assets APK from Google Drive
+      - name: Download APK and libil2cpp.so from Google Drive
         run: |
           set -euo pipefail
+
           gdown "$APK_DRIVE_ID" --output assets.apk
           test -s assets.apk
           unzip -tq assets.apk
           echo "APK downloaded and ZIP integrity verified."
           ls -lh assets.apk
 
-      - name: Locate repository library and extract global-metadata.dat
+          gdown "$LIBIL2CPP_DRIVE_ID" --output libil2cpp.so
+          test -s libil2cpp.so
+          file libil2cpp.so
+
+          if ! readelf -h libil2cpp.so | grep -q 'AArch64'; then
+            echo "::error::Downloaded libil2cpp.so is not an AArch64 ELF library."
+            readelf -h libil2cpp.so || true
+            exit 1
+          fi
+
+          echo "libil2cpp.so downloaded and verified as AArch64 ELF."
+          ls -lh libil2cpp.so
+
+      - name: Extract global-metadata.dat and prepare inputs
         run: |
           set -euo pipefail
           mkdir -p input output
 
-          LIBIL2CPP="$(find . -type f -name 'libil2cpp.so' -not -path './.git/*' -not -path './input/*' -print -quit)"
-          if [ -z "$LIBIL2CPP" ]; then
-            echo "::error::libil2cpp.so was not found in the checked-out repository."
-            echo "Commit the extracted library to the repository, then rerun this workflow."
-            exit 1
-          fi
-
-          cp "$LIBIL2CPP" input/libil2cpp.so
+          cp libil2cpp.so input/libil2cpp.so
           test -s input/libil2cpp.so
-          file input/libil2cpp.so
-          echo "Using repository library: $LIBIL2CPP"
 
           METADATA_PATH="$(unzip -Z1 assets.apk | awk 'tolower($0) ~ /(^|\/)global-metadata\.dat$/ { print; exit }')"
           if [ -z "$METADATA_PATH" ]; then
