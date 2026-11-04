@@ -52,7 +52,7 @@ jobs:
             echo "::error::No APK Google Drive ID was supplied."
             exit 1
           fi
-          gdown --id "$APK_DRIVE_ID" -O oxide.apk
+          gdown "$APK_DRIVE_ID" -O oxide.apk
           test -s oxide.apk
           if ! unzip -tq oxide.apk >/dev/null; then
             echo "::error::The downloaded file is not a valid APK/ZIP. Check that the Google Drive file is publicly downloadable."
@@ -81,7 +81,7 @@ jobs:
           file input/libil2cpp.so
 
           if [ -n "$METADATA_DRIVE_ID" ]; then
-            gdown --id "$METADATA_DRIVE_ID" -O input/global-metadata.dat
+            gdown "$METADATA_DRIVE_ID" -O input/global-metadata.dat
           else
             APK_METADATA="$(unzip -Z1 oxide.apk | grep -E '(^|/)global-metadata\.dat$' | head -n 1 || true)"
             if [ -z "$APK_METADATA" ]; then
