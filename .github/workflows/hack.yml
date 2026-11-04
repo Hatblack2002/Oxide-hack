@@ -13,15 +13,24 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget
+          sudo apt-get install -y wget unzip
           wget https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.40/Il2CppDumper-v6.7.40.zip
           unzip Il2CppDumper-v6.7.40.zip -d Il2CppDumper
 
+      - name: Download APK from Google Drive
+        run: |
+          wget --no-check-certificate "https://drive.google.com/uc?export=download&id=1Fjc8qGOKr4yymeOxIJjtSN73rRVLxoRv" -O oxide_lib.apk
+
+      - name: Extract libil2cpp.so
+        run: |
+          unzip -j oxide_lib.apk "lib/arm64-v8a/libil2cpp.so"
+          
       - name: Run Il2CppDumper
         run: |
           mkdir -p Il2CppDumper/input
-          cp global-metadata.dat Il2CppDumper/input/
           cp libil2cpp.so Il2CppDumper/input/
+          # Usamos un global-metadata.dat vacío solo para probar
+          touch Il2CppDumper/input/global-metadata.dat
           cd Il2CppDumper
           ./Il2CppDumper input/global-metadata.dat input/libil2cpp.so output/
 
