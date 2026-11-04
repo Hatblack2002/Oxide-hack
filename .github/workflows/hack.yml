@@ -29,7 +29,6 @@ jobs:
         run: |
           mkdir -p Il2CppDumper/input
           cp libil2cpp.so Il2CppDumper/input/
-          # Usamos un global-metadata.dat vacío solo para probar
           touch Il2CppDumper/input/global-metadata.dat
           cd Il2CppDumper
           ./Il2CppDumper input/global-metadata.dat input/libil2cpp.so output/
