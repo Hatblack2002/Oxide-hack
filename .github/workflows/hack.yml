@@ -1,40 +1,143 @@
-name: Mod APK Oxide
+name: Oxide IL2CPP analysis
 
 on:
   workflow_dispatch:
+    inputs:
+      apk_drive_id:
+        description: "Google Drive file ID for the APK"
+        required: false
+        type: string
+        default: "1Fjc8qGOKr4yymeOxIJjtSN73rRVLxoRv"
+      metadata_drive_id:
+        description: "Optional Google Drive file ID for a separate global-metadata.dat"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oxide-il2cpp-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build:
+  dump:
+    name: Validate APK and run Il2CppDumper
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+    timeout-minutes: 20
 
-      - name: Install tools
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install .NET 6 runtime and download utility
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 6.0.x
+
+      - name: Install download and archive tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget unzip
-          wget https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.40/Il2CppDumper-v6.7.40.zip
-          unzip Il2CppDumper-v6.7.40.zip -d Il2CppDumper
+          sudo apt-get install -y unzip file pipx
+          pipx ensurepath
+          pipx install gdown
 
-      - name: Download APK from Google Drive
+      - name: Download APK
+        env:
+          APK_DRIVE_ID: ${{ inputs.apk_drive_id }}
         run: |
-          wget --no-check-certificate "https://drive.google.com/uc?export=download&id=1Fjc8qGOKr4yymeOxIJjtSN73rRVLxoRv" -O oxide_lib.apk
+          set -euo pipefail
+          if [ -z "$APK_DRIVE_ID" ]; then
+            echo "::error::No APK Google Drive ID was supplied."
+            exit 1
+          fi
+          "$HOME/.local/bin/gdown" --id "$APK_DRIVE_ID" -O oxide.apk
+          test -s oxide.apk
+          if ! unzip -tq oxide.apk >/dev/null; then
+            echo "::error::The downloaded file is not a valid APK/ZIP. Check that the Google Drive file is publicly downloadable."
+            file oxide.apk
+            exit 1
+          fi
+          echo "APK download and ZIP integrity check passed."
+          ls -lh oxide.apk
 
-      - name: Extract libil2cpp.so
+      - name: Extract IL2CPP libraries and metadata
+        env:
+          METADATA_DRIVE_ID: ${{ inputs.metadata_drive_id }}
         run: |
-          unzip -j oxide_lib.apk "lib/arm64-v8a/libil2cpp.so"
-          
+          set -euo pipefail
+          mkdir -p input output
+
+          APK_LIB="$(unzip -Z1 oxide.apk | grep -E '^lib/arm64-v8a/libil2cpp\.so$' | head -n 1 || true)"
+          if [ -z "$APK_LIB" ]; then
+            echo "::error::The APK does not contain lib/arm64-v8a/libil2cpp.so."
+            echo "Available IL2CPP libraries:"
+            unzip -Z1 oxide.apk | grep -E '(^|/)libil2cpp\.so$' || true
+            exit 1
+          fi
+          unzip -p oxide.apk "$APK_LIB" > input/libil2cpp.so
+          test -s input/libil2cpp.so
+          file input/libil2cpp.so
+
+          if [ -n "$METADATA_DRIVE_ID" ]; then
+            "$HOME/.local/bin/gdown" --id "$METADATA_DRIVE_ID" -O input/global-metadata.dat
+          else
+            APK_METADATA="$(unzip -Z1 oxide.apk | grep -E '(^|/)global-metadata\.dat$' | head -n 1 || true)"
+            if [ -z "$APK_METADATA" ]; then
+              echo "::error::No global-metadata.dat was found inside the APK. Supply its Google Drive file ID in the metadata_drive_id workflow input."
+              exit 1
+            fi
+            unzip -p oxide.apk "$APK_METADATA" > input/global-metadata.dat
+          fi
+
+          test -s input/global-metadata.dat
+          METADATA_SIZE="$(stat -c%s input/global-metadata.dat)"
+          if [ "$METADATA_SIZE" -lt 16 ]; then
+            echo "::error::global-metadata.dat is too small to be valid ($METADATA_SIZE bytes)."
+            exit 1
+          fi
+          echo "Input files validated:"
+          ls -lh input/
+
+      - name: Download and prepare Il2CppDumper
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            "https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.40/Il2CppDumper-net6-v6.7.40.zip" \
+            --output il2cppdumper.zip
+          unzip -tq il2cppdumper.zip
+          mkdir -p tools/Il2CppDumper
+          unzip -q il2cppdumper.zip -d tools/Il2CppDumper
+          DUMPER_DLL="$(find tools/Il2CppDumper -type f -name 'Il2CppDumper.dll' -print -quit)"
+          if [ -z "$DUMPER_DLL" ]; then
+            echo "::error::Il2CppDumper.dll was not found in the official release archive."
+            find tools/Il2CppDumper -maxdepth 2 -type f -print
+            exit 1
+          fi
+          echo "DUMPER_DLL=$DUMPER_DLL" >> "$GITHUB_ENV"
+
       - name: Run Il2CppDumper
         run: |
-          mkdir -p Il2CppDumper/input
-          cp libil2cpp.so Il2CppDumper/input/
-          touch Il2CppDumper/input/global-metadata.dat
-          cd Il2CppDumper
-          ./Il2CppDumper input/global-metadata.dat input/libil2cpp.so output/
+          set -euo pipefail
+          dotnet "$DUMPER_DLL" \
+            "$PWD/input/libil2cpp.so" \
+            "$PWD/input/global-metadata.dat" \
+            "$PWD/output"
+          if [ -z "$(find output -type f -print -quit)" ]; then
+            echo "::error::Il2CppDumper exited without producing output files."
+            exit 1
+          fi
+          echo "Generated output:"
+          find output -maxdepth 3 -type f -printf '%p (%s bytes)\n' | sort
 
-      - name: Upload Result
+      - name: Upload analysis artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Il2Cpp-Dump
-          path: Il2CppDumper/output/
+          name: oxide-il2cpp-analysis
+          path: |
+            output/
+            input/
+          if-no-files-found: warn
+          retention-days: 7
